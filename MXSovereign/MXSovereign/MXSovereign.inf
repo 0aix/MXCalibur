@@ -1,0 +1,97 @@
+;
+; MXSovereign.inf
+;
+
+[Version]
+Signature = "$WINDOWS NT$"
+Class = Mouse
+ClassGuid = {4D36E96F-E325-11CE-BFC1-08002BE10318}
+Provider = %ManufacturerName%
+CatalogFile = mxsovereign.cat
+; DriverVer = 1.0
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+; ================= Class section =====================
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+MXSovereign.sys  = 1
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$
+
+[Standard.NT$ARCH$]
+%MXSovereign.DeviceDesc% = MXSovereign, MXCalibur
+
+[MXSovereign.NT]
+Include = msmouse.inf
+Needs = HID_Mouse_Inst.NT
+CopyFiles = MXSovereign.CopyFiles
+
+[MXSovereign.CopyFiles]
+MXSovereign.sys
+
+;-------------- Service installation
+[MXSovereign.NT.Services]
+Include = msmouse.inf
+Needs = HID_Mouse_Inst.NT.Services
+
+AddService = MXSovereign,, MXSovereign_Service_Inst
+
+; -------------- MXSovereign driver install sections
+[MXSovereign_Service_Inst]
+DisplayName    = %MXSovereign.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; 
+ServiceBinary  = %12%\MXSovereign.sys
+
+[MXSovereign.NT.HW]
+Include = msmouse.inf
+Needs = HID_Mouse_Inst.NT.HW
+AddReg = MXSovereign.HW.AddReg
+
+[MXSovereign.HW.AddReg]
+HKR,,"UpperFilters", 0x00010000,"MXSovereign"
+HKLM,System\CurrentControlSet\Control\Class\{4D36E96F-E325-11CE-BFC1-08002BE10318},"UpperFilters",0x00010008,"MXSovereign","mouclass"
+
+;
+;--- MXSovereign Coinstaller installation ------
+;
+
+[DestinationDirs]
+MXSovereign_CoInstaller_CopyFiles = 11
+
+[MXSovereign.NT.CoInstallers]
+AddReg = MXSovereign_CoInstaller_AddReg
+CopyFiles = MXSovereign_CoInstaller_CopyFiles
+
+[MXSovereign_CoInstaller_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
+
+[MXSovereign_CoInstaller_CopyFiles]
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
+
+[SourceDisksFiles]
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll = 1
+
+[MXSovereign.NT.Wdf]
+KmdfService =  MXSovereign, MXSovereign_wdfsect
+
+[MXSovereign_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+ManufacturerName = "Trophaeum"
+ClassName = "MXSovereign"
+DiskName = "MXSovereign Installation Disk"
+MXSovereign.DeviceDesc = "MXSovereign Device"
+MXSovereign.SVCDESC = "MXSovereign Service"

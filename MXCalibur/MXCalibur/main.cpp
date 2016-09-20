@@ -1,84 +1,244 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <Windows.h>
+#include <stdio.h>
+#include <vector>
+#include <iostream>
+#include <fstream>
+#include "Core"
 using namespace std;
 
-#define WS_DEFAULT ((WS_OVERLAPPEDWINDOW | WS_SYSMENU) & ~(WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME))
 #define CLASSNAME "MXCalibur"
+#define MAX_PTS 20000
 
 LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-float x = 0.0f;
-float y = 0.0f;
-
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+struct dataset
 {
-	WNDCLASSEX wcex;
+	int index;
+	int size;
+	POINT target;
+};
+
+RECT rect;
+COLORREF back = RGB(255, 255, 255);
+
+HANDLE hout;
+HWND hwnd;
+HDC hdc;
+HPEN green;
+HPEN red;
+HPEN orange;
+HPEN white;
+HHOOK hook;
+
+int width;
+int height;
+double wi;
+double hi;
+
+POINT datapts[MAX_PTS];
+vector<dataset> datasets;
+int index = 0;
+int state = 0;
+dataset train;
+
+struct GRID
+{
+	int x;
+	int y;
+	int tx;
+	int ty;
+};
+
+GRID* gridpts;
+int gptsize;
+
+int curr;
+int targ;
+int nexttarg;
+
+void Grid(int dimx, int dimy)
+{
+	double xi = (double)width / (dimx + 1);
+	double yi = (double)height / (dimy + 1);
+	double axi = 65536.0 / (dimx + 1);
+	double ayi = 65536.0 / (dimy + 1);
+
+	gptsize = dimx * dimy;
+	gridpts = new GRID[gptsize];
+	double x = -1.0, y, ax = -1.0, ay;
+	int n = 0;
+	for (int i = 1; i <= dimx; i++)
+	{
+		x += xi;
+		y = -1.0;
+		ax += axi;
+		ay = -1.0;
+		for (int j = 1; j <= dimy; j++)
+		{
+			y += yi;
+			ay += ayi;
+			gridpts[n].x = round(x);
+			gridpts[n].y = round(y);
+			gridpts[n].tx = round(ax);
+			gridpts[n].ty = round(ay);
+			n++;
+		}
+	}
+}
+
+void DrawTarget(int x, int y, int halfwidth)
+{
+	MoveToEx(hdc, x - halfwidth, y, NULL);
+	LineTo(hdc, x + halfwidth, y);
+	MoveToEx(hdc, x, y - halfwidth, NULL);
+	LineTo(hdc, x, y + halfwidth);
+}
+
+POINT GetAbsolute(int x, int y)
+{
+	return POINT{ round(x * wi), round(y * hi) };
+}
+
+int main()
+{
+	SetConsoleTitleA("MXCalibur");
+
+	hout = GetStdHandle(STD_OUTPUT_HANDLE);
+
+	srand(GetTickCount());
+
+	WNDCLASSEX wcex = {};
 	wcex.cbSize = sizeof(WNDCLASSEX);
-	wcex.style = CS_HREDRAW | CS_VREDRAW;
 	wcex.lpfnWndProc = WndProc;
-	wcex.cbClsExtra = 0;
-	wcex.cbWndExtra = 0;
-	wcex.hInstance = hInstance;
-	//wcex.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_APPLICATION));
-	wcex.hIcon = NULL;
-	wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
-	wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-	wcex.lpszMenuName = NULL;
+	wcex.hInstance = GetModuleHandleA(NULL);
+	wcex.hCursor = LoadCursorA(NULL, IDC_ARROW);
 	wcex.lpszClassName = CLASSNAME;
-	//wcex.hIconSm = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_APPLICATION));
-	wcex.hIconSm = NULL;
 
 	if (!RegisterClassEx(&wcex))
 		return 1;
 
-	RECT rect = { 0, 0, 800, 600 };
-	AdjustWindowRect(&rect, WS_DEFAULT, false);
-
-	HWND hwnd = CreateWindow(CLASSNAME, CLASSNAME, WS_DEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top, NULL, NULL, hInstance, NULL);
+	hwnd = CreateWindowEx(WS_EX_TOPMOST | WS_EX_LAYERED, CLASSNAME, CLASSNAME, WS_POPUP, 0, 0, 0, 0, NULL, NULL, GetModuleHandleA(NULL), NULL);
 
 	if (!hwnd)
 		return 1;
 
-	ShowWindow(hwnd, nCmdShow);
+	SetLayeredWindowAttributes(hwnd, back, 0, LWA_COLORKEY);
+	ShowWindow(hwnd, SW_SHOWMAXIMIZED);
 	UpdateWindow(hwnd);
+
+	//Assume top-left corner is (0, 0)
+	GetWindowRect(hwnd, &rect);
+	width = rect.right;
+	height = rect.bottom;
+	wi = 65536.0 / (width - 1);
+	hi = 65536.0 / (height - 1);
+
+	hdc = GetDC(hwnd);
+	green = CreatePen(PS_SOLID, 3, RGB(0, 255, 0));
+	red = CreatePen(PS_SOLID, 3, RGB(255, 0, 0));
+	orange = CreatePen(PS_SOLID, 3, RGB(255, 165, 0));
+	white = CreatePen(PS_SOLID, 3, RGB(255, 255, 255));
+	FillRect(hdc, &rect, (HBRUSH)GetStockObject(WHITE_BRUSH));
 
 	RAWINPUTDEVICE RID;
 	RID.usUsagePage = 1;
 	RID.usUsage = 2;
 	RID.dwFlags = RIDEV_INPUTSINK;
 	RID.hwndTarget = hwnd;
-	bool res = RegisterRawInputDevices(&RID, 1, sizeof(RAWINPUTDEVICE));
+	RegisterRawInputDevices(&RID, 1, sizeof(RAWINPUTDEVICE));
 
-	SetCursorPos(0, 0);
+	hook = SetWindowsHookEx(WH_MOUSE_LL, MouseHookProc, NULL, 0);
 
-	HHOOK hook = SetWindowsHookEx(WH_MOUSE_LL, MouseHookProc, NULL, 0);
+	Grid(46, 26);
 
 	MSG msg = { 0 };
 
 	while (GetMessage(&msg, NULL, 0, 0))
 	{
 		TranslateMessage(&msg); //Translates VK to WM_CHAR 
-		DispatchMessageA(&msg); //Sends message to Window Proc
+		DispatchMessage(&msg); //Sends message to Window Proc
 	}
 
 	UnhookWindowsHookEx(hook);
 
-	UnregisterClass(CLASSNAME, hInstance);
+	DeleteObject(green);
+	DeleteObject(red);
+	DeleteObject(orange);
+	DeleteObject(white);
+	ReleaseDC(hwnd, hdc);
 
-	return (int)msg.wParam;
+	UnregisterClass(CLASSNAME, GetModuleHandle(NULL));
+
+	if (datasets.size() > 0)
+	{
+		ofstream file("trainingdata.txt");
+
+		int count = datasets.size();
+		file << count << endl;
+		for (int i = 0; i < count; i++)
+			file << datasets[i].size << endl;
+		for (int i = 0; i < count; i++)
+			file << datasets[i].target.x << ' ' << datasets[i].target.y << endl;
+		for (int i = 0; i < index; i++)
+			file << datapts[i].x << ' ' << datapts[i].y << endl;
+		file.close();
+	}
+
+	return 0;
 }
 
 LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-	if (wParam == WM_MOUSEMOVE)
-	{
-		MSLLHOOKSTRUCT* msll = (MSLLHOOKSTRUCT*)lParam;
-		if (msll->dwExtraInfo != 0xABABABAB)
-			return 1;
-	}
+	if (nCode == 0 && wParam != WM_MOUSEMOVE)
+	//if (nCode == 0)
+		return 1;
 	return CallNextHookEx(0, nCode, wParam, lParam);
+}
+
+POINT currp;
+POINT targp;
+POINT nexttargp;
+
+void Next()
+{
+	SelectObject(hdc, white);
+	DrawTarget(currp.x, currp.y, 15);
+
+	currp = targp;
+	POINT m = GetAbsolute(currp.x, currp.y);
+	POINT t;
+	do
+	{
+		targp.x = (int)(((double)rand() / RAND_MAX) * 600.0 + 383.0);
+		targp.y = (int)(((double)rand() / RAND_MAX) * 400.0 + 184.0);
+		t = GetAbsolute(targp.x, targp.y);
+		int dx = targp.x - currp.x;
+		int dy = targp.y - currp.y;
+		if (dx * dx + dy * dy > 200)
+			break;
+	}
+	while (true);
+
+	SelectObject(hdc, green);
+	DrawTarget(currp.x, currp.y, 15);
+
+	SelectObject(hdc, red);
+	DrawTarget(targp.x, targp.y, 15);
+
+	train.index = index;
+	train.size = 0;
+	train.target.x = t.x - m.x;
+	train.target.y = t.y - m.y;
+
+	SetConsoleCursorPosition(hout, COORD{ 5, 1 });
+	cout << datasets.size() << flush;
+	SetConsoleCursorPosition(hout, COORD{ 15, 2 });
+	cout << train.target.x << ' ' << train.target.y << "                  " << flush;
+	SetConsoleCursorPosition(hout, COORD{ 12, 3 });
+	cout << "0                  " << endl;
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -90,17 +250,69 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	case WM_INPUT:
 		dwSize = sizeof(RAWINPUT);
 		GetRawInputData((HRAWINPUT)lParam, RID_INPUT, &raw, (PUINT)&dwSize, sizeof(RAWINPUTHEADER));
-		if (raw.header.dwType == RIM_TYPEMOUSE && raw.data.mouse.usFlags ^ MOUSE_MOVE_ABSOLUTE)
+		if (raw.header.dwType == RIM_TYPEMOUSE && raw.data.mouse.usFlags ^ MOUSE_MOVE_ABSOLUTE && raw.data.mouse.ulExtraInformation != 0x5FC1AEDB)
 		{
-			const float scale = 20.0f;
-			x += raw.data.mouse.lLastX * scale;
-			y += raw.data.mouse.lLastY * scale * 1366.0f / 768.0f;
-			INPUT input = {};
-			input.mi.dx = max(0, min((LONG)x, 65536));
-			input.mi.dy = max(0, min((LONG)y, 65536));
-			input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE;
-			input.mi.dwExtraInfo = 0xABABABAB;
-			SendInput(1, &input, sizeof(INPUT));
+			if (raw.data.mouse.usButtonFlags == RI_MOUSE_MIDDLE_BUTTON_UP)
+			{
+				PostQuitMessage(0);
+				break;
+			}
+
+			if (state == 0 && raw.data.mouse.usButtonFlags == RI_MOUSE_LEFT_BUTTON_UP)
+			{
+				cout << "Total Datapoints: 0\nSet: \nTarget Offset: \nDatapoints: " << endl;
+				targp.x = (int)(((double)rand() / RAND_MAX) * 600.0 + 383.0);
+				targp.y = (int)(((double)rand() / RAND_MAX) * 400.0 + 184.0);
+				Next();
+				state = 2;
+			}
+			else if (state == 1)
+			{
+				int dx = raw.data.mouse.lLastX;
+				int dy = raw.data.mouse.lLastY;
+				if (raw.data.mouse.usFlags ^ MOUSE_MOVE_ABSOLUTE && (dx != 0 || dy != 0))
+				{
+					if (index >= MAX_PTS)
+					{
+						PostQuitMessage(0);
+						break;
+					}
+					datapts[index].x = dx;
+					datapts[index].y = dy;
+					train.size++;
+					index++;
+
+					SetConsoleCursorPosition(hout, COORD{ 18, 0 });
+					cout << index << "                  " << flush;
+					SetConsoleCursorPosition(hout, COORD{ 12, 3 });
+					cout << train.size << "                  " << endl;
+				}
+				if (raw.data.mouse.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN)
+				{
+					train.size = 0;
+					index = train.index;
+					state = 2;
+
+					SetConsoleCursorPosition(hout, COORD{ 18, 0 });
+					cout << index << "                  " << flush;
+					SetConsoleCursorPosition(hout, COORD{ 12, 3 });
+					cout << "0                      " << endl;
+				}
+				else if (raw.data.mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)
+				{
+					if (train.size > 0)
+					{
+						datasets.push_back(train);
+						Next();
+						state = 2;
+					}
+				}
+			}
+			else if (state == 2 && (raw.data.mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN))
+			{
+				SetCursorPos(currp.x, currp.y);
+				state = 1;
+			}
 		}
 		break;
 	case WM_DESTROY:
