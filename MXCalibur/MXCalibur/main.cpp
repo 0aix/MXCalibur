@@ -99,7 +99,7 @@ void DrawTarget(int x, int y, int halfwidth)
 
 POINT GetAbsolute(int x, int y)
 {
-	return POINT{ round(x * wi), round(y * hi) };
+	return POINT{ (int)round(x * wi), (int)round(y * hi) };
 }
 
 int main()

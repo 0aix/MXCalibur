@@ -1,4 +1,5 @@
 #include "Sovereign.h"
+#include "math.h"
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text (INIT, DriverEntry)
@@ -9,6 +10,8 @@
 #pragma warning(push)
 #pragma warning(disable:4055) // type case from PVOID to PSERVICE_CALLBACK_ROUTINE
 #pragma warning(disable:4152) // function/data pointer conversion in expression
+
+extern int _fltused = 0x9875;
 
 NTSTATUS DriverEntry(DRIVER_OBJECT* DriverObject, UNICODE_STRING* RegistryPath)
 {
@@ -95,7 +98,7 @@ VOID MouFilter_EvtIoInternalDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, si
 		}
 
 		status = WdfRequestRetrieveInputBuffer(Request, sizeof(CONNECT_DATA), &connectData, &length);
-		if (!NT_SUCCESS(status)) 
+		if (!NT_SUCCESS(status))
 			break;
 
 		devExt->UpperConnectData = *connectData;
@@ -120,22 +123,157 @@ VOID MouFilter_EvtIoInternalDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, si
 	MouFilter_DispatchPassThrough(Request, WdfDeviceGetIoTarget(hDevice));
 }
 
+typedef struct
+{
+	double upper;
+	double x;
+	double intercept;
+	double slope;
+} InfPoint;
+
+InfPoint infpts[] =
+{
+	{ 0.4300079345703125, 0.0, 0.0, 2.488946453284127603704623682623 },
+	{ 1.25, 0.4300079345703125, 1.0702667236328125, 3.7443755931446435549600848545749 },
+	{ 3.8600006103515625, 1.25, 4.140625, 5.6872592064262287414717420154459 },
+	{ 10000.0, 3.8600006103515625, 18.984375, 11.753337912940458211225723261969 }
+};
+
+double MouseToPointer(double v)
+{
+	double absv = fabs(v) / 3.5;
+
+	for (int i = 0; i < sizeof(infpts); i++)
+		if (absv <= infpts[i].upper)
+			return (absv - infpts[i].x) * infpts[i].slope + infpts[i].intercept;
+
+	return 0.0;
+}
+
+LONG round(double d)
+{
+	return d >= 0.0 ? (LONG)(d + 0.5) : (LONG)(d - 0.5);
+}
+
+int overwatch = 0;
+double ax = 65535.0 / 2.0;
+double ay = 65535.0 / 2.0;
+double lx = 0.0;
+double ly = 0.0;
+
 VOID MouFilter_ServiceCallback(PDEVICE_OBJECT DeviceObject, PMOUSE_INPUT_DATA InputDataStart, PMOUSE_INPUT_DATA InputDataEnd, PULONG InputDataConsumed)
 {
 	PDEVICE_EXTENSION devExt;
 	WDFDEVICE hDevice;
-	
-	for (PMOUSE_INPUT_DATA input = InputDataStart; input != InputDataEnd; input++)
-	{
-		if (input->Flags ^ MOUSE_MOVE_ABSOLUTE)
-		{
-			input->LastX *= -1;
-			input->LastY *= -1;
-		}
-	}
+
+	KFLOATING_SAVE kfsave;
+	NTSTATUS status = KeSaveFloatingPointState(&kfsave);
+
+	if (!NT_SUCCESS(status))
+		return;
 
 	hDevice = WdfWdmDeviceGetWdfDeviceHandle(DeviceObject);
 	devExt = FilterGetData(hDevice);
+
+	for (PMOUSE_INPUT_DATA input = InputDataStart; input != InputDataEnd; input++)
+	{
+		if (input->Flags & MOUSE_ATTRIBUTES_CHANGED)
+			continue;
+
+		// THE DEVICE WRITES TO AN INPUT BUFFER WHICH IS CREATED WHEN THE DEVICE CONNECTS.
+		// IT DOES NOT NECESSARILY OVERWRITE FLAGS ON EVERY UPDATE.
+		// THIS MEANS IF WE SET THE FLAG TO ABSOLUTE, IT MIGHT NOT CHANGE BACK TO RELATIVE.
+		// RIGHT NOW, ALL DATA IS ASSUMED TO BE GIVEN AS RELATIVE. IN THE FUTURE, 
+
+		if (input->ButtonFlags & MOUSE_BUTTON_5_DOWN)
+		{
+			overwatch = !overwatch;
+			input->ButtonFlags &= ~MOUSE_BUTTON_5_DOWN;
+		}
+		else if (input->ButtonFlags & MOUSE_BUTTON_5_UP)
+			input->ButtonFlags &= ~MOUSE_BUTTON_5_UP;
+
+		// new
+		if (overwatch)
+		{
+			LONG dx = input->LastX;
+			LONG dy = input->LastY;
+
+			const double x_sensitivity = 0.286111;
+			const double y_sensitivity = 0.195922;
+			double qx = x_sensitivity * dx * 65535.0 / 1366.0 + lx;
+			double qy = y_sensitivity * dy * 65535.0 / 768.0 + ly;
+			LONG rx = round(qx);
+			LONG ry = round(qy);
+			lx = qx - rx;
+			ly = qy - ry;
+			input->LastX = rx;
+			input->LastY = ry;
+		}
+
+#define ERASE_FOR_NOW
+#ifndef ERASE_FOR_NOW
+
+		if (dx != 0 || dy != 0)
+		{
+			const double sens = 0.2 * 0.8;
+			const double rev_sens = -1.0 * sens;
+
+			double DX = 0.0;
+			double DY = 0.0;
+
+			if (dy == 0.0)
+			{
+				if (dx > 0.0)
+					DX = sens * MouseToPointer(dx) * 65535.0 / 1366.0;
+				else
+					DX = rev_sens * MouseToPointer(dx) * 65535.0 / 1366.0;
+			}
+			else if (dx == 0.0)
+			{
+				if (dy > 0.0)
+					DY = sens * MouseToPointer(dy) * 65535.0 / 768.0;
+				else
+					DY = rev_sens * MouseToPointer(dy) * 65535.0 / 768.0;
+			}
+			else
+			{
+				double v = sqrt(dx * dx + dy * dy);
+				double av = sens * MouseToPointer(v);
+				DX = dx / v * av * 65535.0 / 1366.0;
+				DY = dy / v * av * 65535.0 / 768.0;
+			}
+
+			if (!overwatch)
+			{
+				ax += DX;
+				ay += DY;
+				ax = max(0.0, min(ax, 65535.0));
+				ay = max(0.0, min(ay, 65535.0));
+
+				input->LastX = round(ax);
+				input->LastY = round(ay);
+				input->Flags |= MOUSE_MOVE_ABSOLUTE;
+			}
+			else
+			{
+				const double x_sensitivity = 0.286111;
+				const double y_sensitivity = 0.195922;
+				double qx = x_sensitivity * DX - dx + lx;
+				double qy = y_sensitivity * DY - dy + ly;
+				LONG rx = round(qx);
+				LONG ry = round(qy);
+				lx = qx - rx;
+				ly = qy - ry;
+				input->LastX = rx;
+				input->LastY = ry;
+				input->Flags &= ~MOUSE_MOVE_ABSOLUTE;
+			}
+		}
+#endif
+	}
+
+	KeRestoreFloatingPointState(&kfsave);
 
 	(*(PSERVICE_CALLBACK_ROUTINE)devExt->UpperConnectData.ClassService)(devExt->UpperConnectData.ClassDeviceObject, InputDataStart, InputDataEnd, InputDataConsumed);
 }

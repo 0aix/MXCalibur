@@ -190,8 +190,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				}
 				else
 				{
-					ax = 0.3 * X4(0, 0) - dx + lx;
-					ay = 0.3 * X4(0, 1) - dy + ly;
+					const double x_sensitivity = 0.352927;
+					const double y_sensitivity = 0.214394;
+					ax = x_sensitivity * X4(0, 0) - dx + lx;
+					ay = y_sensitivity * X4(0, 1) - dy + ly;
 					double rx = round(ax);
 					double ry = round(ay);
 					lx = ax - rx;
